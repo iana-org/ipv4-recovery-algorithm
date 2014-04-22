@@ -1,0 +1,449 @@
+#!/usr/bin/env python
+#
+#   recover-ipv4-space
+#
+#   Perform "Global Policy for Post Exhaustion IPv4 Allocation by IANA" policy.
+#
+#   Copyright (c) 2014, Internet Corporation for Assigned Names and
+#   Numbers. All rights reserved. See readme file for license.
+#
+
+from __future__ import print_function
+try:
+    from urllib.request import urlopen
+except ImportError:
+    from urllib2 import urlopen
+import xml.etree.ElementTree as etree
+
+import argparse
+import copy
+import datetime
+import math
+import operator
+import struct
+import socket
+import sys
+
+__version__ = "20140422"
+
+config = {
+    'allocatees': ['ARIN', 'RIPE NCC', 'AFRINIC', 'APNIC', 'LACNIC'],
+    'whois_map': {
+        'whois.arin.net': 'ARIN',
+        'whois.ripe.net': 'RIPE NCC',
+        'whois.apnic.net': 'APNIC',
+        'whois.afrinic.net': 'AFRINIC',
+        'whois.lacnic.net': 'LACNIC',
+    },
+    'xmlns': 'http://www.iana.org/assignments',
+    'allocation-url': 'http://www.iana.org/assignments/ipv4-address-space/ipv4-address-space.xml',
+    'recovered-url': 'http://www.iana.org/assignments/ipv4-recovered-address-space/ipv4-recovered-address-space.xml',
+}
+
+
+class IPv4Address(object):
+
+    def __init__(self, value):
+        if isinstance(value, basestring):
+            self.assign(value)
+        else:
+            self.value = value
+
+    def __int__(self):
+        return self.value
+
+    def __str__(self):
+        return socket.inet_ntoa(struct.pack('!I', self.value))
+
+    def __repr__(self):
+        return "IPv4Address('{}')".format(self.__str__())
+
+    def __add__(self, other):
+        return int(self) + int(other)
+
+    def __sub__(self, other):
+        return int(self) - int(other)
+
+    def assign(self, s):
+        self.value = struct.unpack('!I', socket.inet_aton(s))[0]
+
+
+class IPv4Range(object):
+
+    def __init__(self, start=None, end=None, cidr=None):
+        if start and end:
+            if isinstance(start, IPv4Address):
+                self.start = start
+            else:
+                self.start = IPv4Address(start)
+            if isinstance(end, IPv4Address):
+                self.end = end
+            else:
+                self.end = IPv4Address(end)
+        elif cidr:
+            self.load_cidr(cidr)
+
+        self.preference = None
+
+
+    def __cmp__(self, other):
+        return cmp(int(self.start), int(other.start))
+
+    def __str__(self):
+        return self.cidr() or self.startend()
+
+    def __len__(self):
+        return int(self.end) - int(self.start) + 1
+
+    def __repr__(self):
+        return "IPv4Range('{}')".format(self.__str__())
+
+    def cidr(self):
+        netmask = 0
+        while (int(self.start) & (2**netmask - 1) == 0):
+            netmask += 1
+        while (int(self.start) + 2**netmask - 1 > int(self.end)):
+            netmask -= 1
+        if (int(self.start) + 2**netmask - 1 == int(self.end)):
+            return "{}/{}".format(self.start, 32-netmask)
+        else:
+            return False
+
+    def startend(self):
+        return "{}-{}".format(str(self.start), str(self.end))
+
+    def cidr_blocks(self):
+
+        ip = int(self.start)
+        while (ip < int(self.end)):
+            netmask = 32
+            while (ip & (2**(32-netmask+1) - 1) == 0):
+                netmask -= 1
+            while (ip + 2**(32-netmask) - 1 > int(self.end)):
+                netmask += 1
+            while (ip + 2**(32-netmask) & (2**(32-netmask)-1) != 0):
+                netmask += 1
+            yield IPv4Range(ip, ip + 2**(32-netmask)-1)
+            ip = ip + 2**(32-netmask)
+
+    def load_cidr(self, s):
+
+        (ip, netmask) = s.split('/', 2)
+        if not ip.find('.') > 0:
+            ip = "{}.0.0.0".format(int(ip, 10))
+        netmask = int(netmask)
+        self.start = IPv4Address(ip)
+        self.end = IPv4Address(int(self.start) + 2**(32-netmask) - 1)
+
+    def contains(self, r):
+
+        if int(r.start) >= int(self.start) and int(r.end) <= int(self.end):
+            return True
+        return False
+
+
+
+class AddressPool(object):
+
+    def __init__(self):
+        self.entries = []
+
+    def __len__(self):
+        return sum([len(a) for a in self.entries])
+
+    def __add__(self, entry):
+        self.entries.append(entry)
+
+    def append(self, entry):
+        self.entries.append(entry)
+
+    def remove(self, start, end):
+
+        new_entries = []
+        for entry in self.entries:
+            if entry.start == start and entry.end == end:
+                continue
+            elif entry.start == start:
+                entry.start = IPv4Address(end+1)
+            elif entry.end == end:
+                entry.end = IPv4Address(start-1)
+            new_entries.append(entry)
+        self.entries = new_entries
+
+    def consolidate(self):
+
+        new_entries = []
+        last_entry = None
+        for entry in sorted(self.entries):
+            if not last_entry:
+                last_entry = entry
+                continue
+            if int(entry.start) == int(last_entry.end) + 1 and entry.allocatee == last_entry.allocatee \
+            and entry.record_date == last_entry.record_date:
+                last_entry.end = entry.end
+            else:
+                new_entries.append(last_entry)
+                last_entry = entry
+
+        new_entries.append(last_entry)
+        self.entries = new_entries
+
+
+class RecoveredAddressRegistry(object):
+
+    def __init__(self):
+
+        self.recovered = AddressPool()
+        self.reallocated = AddressPool()
+        self.preferred_blocks = []
+        self.original_registry = None
+
+    def ns(self, tag):
+        return "{{{0}}}{1}".format(config['xmlns'], tag)
+
+    def load_allocated_space(self, registry_file):
+
+        root = etree.fromstring(registry_file)
+        for record in root.findall(self.ns('record')):
+            prefix = record.find(self.ns('prefix')).text
+            try:
+                whois = record.find(self.ns('whois')).text
+            except AttributeError:
+                continue
+            block = IPv4Range(cidr=prefix)
+            block.preference = config['whois_map'].get(whois)
+            self.preferred_blocks.append(block)
+
+    def load_recovered_space(self, registry_file):
+
+        root = etree.fromstring(registry_file)
+        self.original_registry = root
+
+        for record in root.findall('{0}[@id="ipv4-recovered-address-space-1"]/{1}'.format(self.ns('registry'),
+                                                                                          self.ns('record'))):
+            start = record.find(self.ns('start')).text
+            end = record.find(self.ns('end')).text
+            allocatee = record.find(self.ns('returned')).text
+            record_date = record.find(self.ns('date')).text
+            status = record.find(self.ns('status')).text
+
+            my_block = IPv4Range(start, end)
+
+            preference = None
+            for preferred_block in self.preferred_blocks:
+                if preferred_block.contains(my_block):
+                    preference = preferred_block.preference
+
+            for cidr_block in my_block.cidr_blocks():
+                cidr_block.preference = preference
+                cidr_block.allocatee = allocatee
+                cidr_block.record_date = record_date
+                cidr_block.status = status
+                self.recovered.append(cidr_block)
+
+        for record in root.findall('{0}[@id="ipv4-recovered-address-space-2"]/{1}'.format(self.ns('registry'),
+                                                                                          self.ns('record'))):
+            start = record.find(self.ns('start')).text
+            end = record.find(self.ns('end')).text
+            block = IPv4Range(start, end)
+            block.allocatee = record.find(self.ns('designation')).text
+            block.record_date = record.find(self.ns('date')).text
+            block.whois = record.find(self.ns('whois')).text
+            block.status = record.find(self.ns('status')).text
+            block.notes = record.find(self.ns('notes')).text
+            self.reallocated.append(block)
+
+    def find_best_match(self, amount, allocatee):
+
+        candidates = {}
+        for block in self.recovered.entries:
+            score = float(math.log(len(block), 2))/32
+            if block.preference == allocatee:
+                score += 0.8
+            if len(block) == amount:
+                score += 0.2
+            candidates[block] = score
+        for block in reversed(sorted(candidates.iteritems(), key=operator.itemgetter(1))):
+            size = block[0].end - block[0].start + 1
+            if size > amount:
+                return (block[0].start, IPv4Address(block[0].start + amount - 1))
+            else:
+                return (block[0].start, block[0].end)
+
+    def reclaim(self, start, end, allocatee):
+
+        self.recovered.remove(start, end)
+        block = IPv4Range(start, end)
+        block.allocatee = allocatee
+        block.whois = rir_whois(allocatee)
+        current_date = datetime.datetime.utcnow()
+        block.record_date = "{:04}-{:02}".format(current_date.year, current_date.month)
+        block.status = 'ALLOCATED'
+        self.reallocated.append(block)
+
+    def xml(self):
+
+        document = copy.deepcopy(self.original_registry)
+
+        title = document.find(self.ns('title'))
+        title.text = title.text + " (Provisional)"
+
+        updated = document.find(self.ns('updated'))
+        current_date = datetime.datetime.utcnow()
+        updated.text = "{:04}-{:02}-{:02}".format(current_date.year, current_date.month, current_date.day)
+
+        recovered = document.find('{0}[@id="ipv4-recovered-address-space-1"]'.format(self.ns('registry')))
+        for record in recovered.findall(self.ns('record')):
+            recovered.remove(record)
+        for block in sorted(self.recovered.entries):
+            entry = etree.SubElement(recovered, self.ns('record'))
+            etree.SubElement(entry, self.ns('start')).text = str(block.start)
+            etree.SubElement(entry, self.ns('end')).text = str(block.end)
+            etree.SubElement(entry, self.ns('returned')).text = block.allocatee
+            etree.SubElement(entry, self.ns('date')).text = block.record_date
+            etree.SubElement(entry, self.ns('status')).text = block.status
+
+        reallocated = document.find('{0}[@id="ipv4-recovered-address-space-2"]'.format(self.ns('registry')))
+        for record in reallocated.findall(self.ns('record')):
+            reallocated.remove(record)
+
+        for block in sorted(self.reallocated.entries):
+            entry = etree.SubElement(reallocated, self.ns('record'))
+            etree.SubElement(entry, self.ns('start')).text = str(block.start)
+            etree.SubElement(entry, self.ns('end')).text = str(block.end)
+            etree.SubElement(entry, self.ns('designation')).text = block.allocatee
+            etree.SubElement(entry, self.ns('whois')).text = block.whois
+            etree.SubElement(entry, self.ns('date')).text = block.record_date
+            etree.SubElement(entry, self.ns('status')).text = block.status
+            etree.SubElement(entry, self.ns('notes'))
+
+        etree.register_namespace('', config['xmlns'])
+        self.indent(document)
+        prelude = '<?xml version="1.0" encoding="UTF-8"?>\n'
+        return prelude + etree.tostring(document).rstrip()
+
+    def indent(self, e, level=0, tab_size=4):
+
+        i = "\n" + level * tab_size * " "
+        if len(e):
+            if not e.text or not e.text.strip():
+                e.text = i + tab_size * " "
+            if not e.tail or not e.tail.strip():
+                e.tail = i
+            for e in e:
+                self.indent(e, level+1)
+            if not e.tail or not e.tail.strip():
+               e.tail = i
+        else:
+            if level and (not e.tail or not e.tail.strip()):
+                e.tail = i
+
+    def consolidate(self):
+        self.recovered.consolidate()
+        self.reallocated.consolidate()
+
+def load_from_url_or_file(location):
+
+    try:
+        return urlopen(location).read()
+    except ValueError:
+        return open(location).read()
+
+
+def rir_whois(allocatee):
+
+    for whois, rir in config['whois_map'].iteritems():
+        if allocatee == rir:
+            return whois
+    return None
+
+def perform_algorithm(arguments):
+
+    registry = RecoveredAddressRegistry()
+
+    address_space = load_from_url_or_file(arguments.addressspace)
+    registry.load_allocated_space(address_space)
+
+    recovered_space = load_from_url_or_file(arguments.input)
+    registry.load_recovered_space(recovered_space)
+
+    allocatees = config['allocatees']
+
+    available_pool_size = len(registry.recovered)
+    available_bits = math.log(available_pool_size, 2)
+    cidr_size = int(32 - math.floor(math.log(available_pool_size / len(allocatees), 2)))
+
+    print("Available Pool:")
+    for entry in registry.recovered.entries:
+        print("  {:<20} {:>10}".format(entry, len(entry)))
+    print("  {:<20} {:>10}".format("-- Total", available_pool_size))
+
+    print()
+    print("IP addresses available to allocate: {:,} ({:.1f} bits)".format(available_pool_size, available_bits))
+    print("Each allocatee receives: {:,} (/{} equivalent)".format(2**(32-cidr_size), cidr_size))
+
+    if cidr_size > 24:
+        print("Recipient allocations not large enough to satisfy global policy minimums. Nothing to do.")
+        sys.exit()
+
+    needs = {}
+    allocations = {}
+    for allocatee in allocatees:
+        needs[allocatee] = 2**(32-cidr_size)
+        allocations[allocatee] = []
+
+    print()
+    print("Making allocations:")
+    while 1:
+        made_allocation = False
+        for allocatee in allocatees:
+            if needs[allocatee] > 0:
+                made_allocation = True
+                (start, end) = registry.find_best_match(needs[allocatee], allocatee)
+                iprange = IPv4Range(start=start, end=end)
+                for cidr in iprange.cidr_blocks():
+                    print("  {} ({} addresses) -> {}".format(cidr, len(cidr), allocatee))
+                    allocations[allocatee].append(cidr)
+                registry.reclaim(start, end, allocatee)
+                needs[allocatee] -= len(iprange)
+
+        if not made_allocation:
+            break
+
+    print()
+    print("Allocations Made:")
+    for allocatee in sorted(allocations.keys()):
+        total = 0
+        print("-> {}:".format(allocatee))
+        for allocation in sorted(allocations[allocatee]):
+            print("   {:<20} {:>10}".format(allocation, len(allocation)))
+            total += len(allocation)
+        print("   {:<20} {:>10}".format("-- Total", total))
+
+    print()
+
+    registry.consolidate()
+
+    if arguments.output:
+        f = open(arguments.output, 'wb')
+        f.write(registry.xml())
+        f.close()
+
+
+def main():
+
+    parser = argparse.ArgumentParser(sys.argv[0],
+                                     description="Perform IPv4 recovery algorithm.",
+                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('-i', '--input', nargs='?', metavar="FILE/URL", default=config['recovered-url'],
+                        help="input recovered IPv4 registry")
+    parser.add_argument('-a', '--addressspace', nargs='?', metavar="FILE/URL", default=config['allocation-url'],
+                        help="input IPv4 address space registry")
+    parser.add_argument('-o', '--output', nargs='?', metavar="FILE", default=None,
+                        help="output recovered IPv4 registry")
+    arguments = parser.parse_args()
+
+    perform_algorithm(arguments)
+
+if __name__ == '__main__':
+    main()
