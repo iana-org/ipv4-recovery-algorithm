@@ -144,7 +144,6 @@ class IPv4Range(object):
         return False
 
 
-
 class AddressPool(object):
 
     def __init__(self):
@@ -280,7 +279,7 @@ class RecoveredAddressRegistry(object):
             else:
                 return (block[0].start, block[0].end)
 
-    def reclaim(self, start, end, allocatee):
+    def reallocate(self, start, end, allocatee):
 
         self.recovered.remove(start, end)
         block = IPv4Range(start, end)
@@ -296,7 +295,7 @@ class RecoveredAddressRegistry(object):
         document = copy.deepcopy(self.original_registry)
 
         title = document.find(self.ns('title'))
-        title.text = title.text + " (Provisional)"
+        title.text += " (Provisional)"
 
         updated = document.find(self.ns('updated'))
         current_date = datetime.datetime.utcnow()
@@ -414,7 +413,7 @@ def perform_algorithm(arguments):
                 for cidr in iprange.cidr_blocks():
                     print("  {} ({} addresses) -> {}".format(cidr, len(cidr), allocatee))
                     allocations[allocatee].append(cidr)
-                registry.reclaim(start, end, allocatee)
+                registry.reallocate(start, end, allocatee)
                 needs[allocatee] -= len(iprange)
 
         if not made_allocation:
