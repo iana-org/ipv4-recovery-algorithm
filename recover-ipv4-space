@@ -82,6 +82,8 @@ class IPv4Range(object):
                 self.end = IPv4Address(end)
         elif cidr:
             self.load_cidr(cidr)
+        else:
+            raise ValueError, "Missing IP range value"
 
         self.preference = None
 
@@ -210,7 +212,10 @@ class RecoveredAddressRegistry(object):
                 whois = record.find(self.ns('whois')).text
             except AttributeError:
                 continue
-            block = IPv4Range(cidr=prefix)
+            try:
+                block = IPv4Range(cidr=prefix)
+            except:
+                raise ValueError, "Illegal value in allocated address registry \"{}\"".format(etree.tostring(record))
             block.preference = config['whois_map'].get(whois)
             self.preferred_blocks.append(block)
 
@@ -226,8 +231,10 @@ class RecoveredAddressRegistry(object):
             allocatee = record.find(self.ns('returned')).text
             record_date = record.find(self.ns('date')).text
             status = record.find(self.ns('status')).text
-
-            my_block = IPv4Range(start, end)
+            try:
+                my_block = IPv4Range(start, end)
+            except:
+                raise ValueError, "Illegal value in recovered address registry \"{}\"".format(etree.tostring(record))
 
             preference = None
             for preferred_block in self.preferred_blocks:
@@ -245,7 +252,10 @@ class RecoveredAddressRegistry(object):
                                                                                           self.ns('record'))):
             start = record.find(self.ns('start')).text
             end = record.find(self.ns('end')).text
-            block = IPv4Range(start, end)
+            try:
+                block = IPv4Range(start, end)
+            except:
+                raise ValueError, "Illegal value in recovered address registry \"{}\"".format(etree.tostring(record))
             block.allocatee = record.find(self.ns('designation')).text
             block.record_date = record.find(self.ns('date')).text
             block.whois = record.find(self.ns('whois')).text
