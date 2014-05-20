@@ -1,26 +1,23 @@
-IPv4 Reclamation Algorithm (Beta)
-=================================
+IPv4 Reclamation Algorithm
+==========================
 
 OVERVIEW
 
-In May 2012, the ICANN Board ratified a global policy Global Policy for
-Post Exhaustion IPv4 Allocation by IANA.  This policy called for the
-establishment of a Recovered IPv4 Pool, which contains fragments leftover
-in the IANA and space that has been returned to the IANA by other means.
-The policy also called for IANA to make allocations from the Recovered
-IPv4 Pool once the pool is declared active.
+In May 2012, the ICANN Board ratified the Global Policy for Post Exhaustion
+IPv4 Allocation by IANA.  This policy called for the establishment of a
+Recovered IPv4 Pool, which contains fragments leftover in the IANA and
+space that has been returned to the IANA by other means. The policy also
+called for IANA to make allocations from the Recovered IPv4 Pool once the
+pool is declared active.
 
-The pool will initially be declared active as soon as the first RIR has
-less than a /9 of IPv4 space in its inventory. The pool will also be
-declared active during “IPv4 allocation periods”, 6-month periods
-following 1 March or 1 September in each year.
+The pool was initially be declared active as soon as the first RIR has
+less than a /9 of IPv4 space in its inventory. This occurred on 20 May
+2014. The pool will also be declared active during “IPv4 allocation 
+periods”, 6-month periods following 1 March or 1 September in each year.
 
 ICANN reported that we will use an open-source software program to 
 perform the address selection process. This code implements the IPv4 
 reclamation policy.
-
-This code is provisional and may be revised based on feedback from the
-community prior to its initial invocation by the Global Policy.
 
 REQUIREMENTS
 

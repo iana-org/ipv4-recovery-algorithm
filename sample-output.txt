@@ -2,7 +2,7 @@ Sample outputs
 ==============
 
 Here are sample outputs based on the IPv4 recovered registry as at
-2014-04-22. The algorithm can run through 9 generations of alloctions
+2014-04-22. The algorithm can run through 9 generations of allocations
 before the pool is exhausted to the point it no longer meets the
 minimums set in the Global Policy.
 
