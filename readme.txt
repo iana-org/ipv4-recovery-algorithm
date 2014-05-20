@@ -10,10 +10,10 @@ space that has been returned to the IANA by other means. The policy also
 called for IANA to make allocations from the Recovered IPv4 Pool once the
 pool is declared active.
 
-The pool was initially be declared active as soon as the first RIR has
-less than a /9 of IPv4 space in its inventory. This occurred on 20 May
-2014. The pool will also be declared active during “IPv4 allocation 
-periods”, 6-month periods following 1 March or 1 September in each year.
+The pool was declared active on 20 May 2014 when the first RIR had less 
+than a /9 of IPv4 space in its inventory. The pool will also be declared 
+active during “IPv4 allocation periods”, 6-month periods following 1 March
+or 1 September in each year.
 
 ICANN reported that we will use an open-source software program to 
 perform the address selection process. This code implements the IPv4 
